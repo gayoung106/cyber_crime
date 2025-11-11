@@ -110,6 +110,7 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
+
 # ------------------------------------------------------------
 #  6. 상관분석
 # ------------------------------------------------------------
@@ -128,6 +129,22 @@ X = sm.add_constant(df[["internet_rate", "trust_index"]])
 y = df["total_crime"]
 model = sm.OLS(y, X).fit()
 print(model.summary())
+
+#  회귀선 시각화 
+plt.figure(figsize=(8,6))
+sns.regplot(
+    data=df,
+    x="trust_index", y="total_crime",
+    scatter_kws={"color": "gray", "s": 60},
+    line_kws={"color": "red", "lw": 2}
+)
+plt.title("신뢰지수와 사이버범죄 발생 간 관계")
+plt.xlabel("신뢰지수")
+plt.ylabel("사이버범죄 건수")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("figure2_regression.png", dpi=300)
+plt.show()
 
 #  VIF
 vif = pd.DataFrame()
@@ -152,6 +169,22 @@ df_lag = df.dropna(subset=["trust_index_lag"])
 X_lag = sm.add_constant(df_lag[["internet_rate", "trust_index_lag"]])
 model_lag = sm.OLS(df_lag["total_crime"], X_lag).fit()
 print(model_lag.summary())
+
+#  시차 효과 시각화
+plt.figure(figsize=(8,6))
+sns.regplot(
+    data=df_lag,
+    x="trust_index_lag", y="total_crime",
+    scatter_kws={"color": "skyblue", "s": 60},
+    line_kws={"color": "darkblue", "lw": 2}
+)
+plt.title("전년도 신뢰지수와 사이버범죄 발생 간 관계 (시차 효과)")
+plt.xlabel("전년도 신뢰지수")
+plt.ylabel("사이버범죄 건수")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("figure3_lag_effect.png", dpi=300)
+plt.show()
 
 # ------------------------------------------------------------
 #  9. 비선형(제곱항)
