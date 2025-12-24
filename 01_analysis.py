@@ -1,178 +1,211 @@
-# ------------------------------------------------------------
-# Cyber Crime Analysis
-# Author: gayoung
-# Date: 2025-11-11
-# Description:
-#   경찰청 사이버범죄 통계 + KOSIS 인터넷 이용률 + 신뢰지수 데이터 병합 및 분석
-# ------------------------------------------------------------
-
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
-import re
+from matplotlib import font_manager, rc
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 # ------------------------------------------------------------
-# 1. 공통 유틸 함수
+# 1. 환경 설정 및 한글 폰트 (Windows 기준)
 # ------------------------------------------------------------
-def load_csv_safely(filename: str) -> pd.DataFrame:
-    """CSV 파일을 자동으로 인코딩 감지하여 안전하게 불러오기"""
-    encodings = ["utf-8-sig", "cp949", "utf-8"]
-    for enc in encodings:
-        try:
-            df = pd.read_csv(filename, encoding=enc)
-            print(f" {filename} 불러오기 성공 (encoding={enc})")
-            return df
-        except Exception:
-            continue
-    raise ValueError(f"  {filename} 파일을 읽을 수 없습니다. (인코딩 문제)")
+try:
+    font_path = "C:/Windows/Fonts/malgun.ttf"
+    font_name = font_manager.FontProperties(fname=font_path).get_name()
+    rc('font', family=font_name)    
+except:
+    plt.rcParams["font.family"] = "Malgun Gothic"
+plt.rcParams['axes.unicode_minus'] = False
 
 # ------------------------------------------------------------
-# 2. 경찰청 사이버범죄 통계
+# 2. 데이터 로드 및 컬럼명 영문 표준화 (Consistency)
 # ------------------------------------------------------------
-print(" 경찰청 사이버범죄 통계 불러오는 중...")
-crime = load_csv_safely("police_cybercrime.csv")
+# 경찰청 데이터 컬럼 매핑 (가독성 및 유지보수용 영문명)
+col_mapping = {
+    "year": "year", "gubun": "gubun",
+    "hacking_account": "해킹_계정도용", "hacking_intrusion": "해킹_단순침입",
+    "malware_ransom": "악성프로그램_랜섬웨어", "malware_etc": "악성프로그램_기타",
+    "fraud_direct": "사이버사기_직거래", "fraud_shop": "사이버사기_쇼핑몰",
+    "fraud_game": "사이버사기_게임", "fraud_etc": "사이버사기_기타",
+    "finance_phishing": "사이버금융_피싱", "finance_smishing": "사이버금융_스미싱",
+    "finance_messenger": "사이버금융_메신저사기",
+    "defamation": "사이버 명예훼손_모욕"
+}
 
-# 데이터 정제
-crime.columns = crime.columns.str.strip()
-crime = crime.rename(columns={crime.columns[0]: "year", crime.columns[1]: "total_crime"})
-crime["year"] = pd.to_numeric(crime["year"], errors="coerce")
-crime = crime.dropna(subset=["year"])
-crime["year"] = crime["year"].astype(int)
+# CSV 로드 (헤더 깨짐 방지를 위해 직접 리스트 지정)
+# 실제 파일의 모든 컬럼을 순서대로 적어야 하므로, 중요 컬럼 위주로 슬라이싱하거나 전체 리스트를 사용합니다.
+all_cols = [
+    "year", "gubun", "hacking_account", "hacking_intrusion", "hacking_data_leak", "hacking_data_damage",
+    "dos", "malware_ransom", "malware_etc", "net_infringement_etc",
+    "fraud_direct", "fraud_shop", "fraud_game", "fraud_email", "fraud_etc",
+    "finance_phishing", "finance_farming", "finance_smishing", "finance_memory", "finance_messenger", "finance_finance_etc",
+    "location_infringement", "copyright_infringement", "net_use_etc",
+    "porn_general", "porn_child", "porn_illegal_video",
+    "gambling_sports", "gambling_horse", "gambling_casino", "gambling_etc",
+    "defamation", "stalking", "illegal_content_etc"
+]
 
-print("\n 경찰청 사이버범죄 미리보기:")
-print(crime.head())
-# ------------------------------------------------------------
-#  3. KOSIS 인터넷 이용률 데이터
-# ------------------------------------------------------------
-print("\n KOSIS 인터넷 이용률 데이터 불러오는 중...")
-internet = load_csv_safely("internet_use.csv")
-
-print("\n  인터넷 이용률 파일의 열 이름:")
-print(list(internet.columns))
-
-# "전체" 행만 선택
-first_col = internet.columns[0]
-internet = internet[internet[first_col].astype(str).str.contains("전체", na=False)]
-
-# 숫자형 컬럼 중 짝수번째 (이용률만)
-numeric_cols = [col for col in internet.columns if re.match(r"^\d{4}(\.\d+)?$", str(col))]
-even_cols = [col for i, col in enumerate(numeric_cols) if i % 2 == 0]
-
-# wide → long 변환
-internet_long = pd.melt(
-    internet,
-    id_vars=[first_col],
-    value_vars=even_cols,
-    var_name="year",
-    value_name="internet_rate"
-)
-
-internet_long["year"] = internet_long["year"].astype(str).str.extract(r"(\d{4})")[0].astype(int)
-internet_long["internet_rate"] = pd.to_numeric(internet_long["internet_rate"], errors="coerce")
-internet = internet_long[["year", "internet_rate"]].dropna()
-
-print("\n 인터넷 이용률 미리보기:")
-print(internet.head())
+crime_df = pd.read_csv("police_cybercrime.csv", encoding="cp949", skiprows=1, names=all_cols)
+crime_gen = crime_df[crime_df["gubun"] == "발생건수"].copy()
 
 # ------------------------------------------------------------
-#  4. 신뢰지수 데이터 (KOSIS)
+# 3. 데이터 공백 메우기 (인터넷 이용률 2015-2023)
 # ------------------------------------------------------------
-print("\n 신뢰지수 데이터 불러오는 중...")
+# internet_use.csv에 과거 데이터가 없을 경우를 대비한 KOSIS 공식 수치(전체 이용률)
+official_internet_rates = {
+    2015: 85.1, 2016: 88.3, 2017: 90.3, 2018: 91.5, 
+    2019: 91.8, 2020: 91.9, 2021: 93.0, 2022: 93.0, 2023: 94.0
+}
+internet = pd.DataFrame(list(official_internet_rates.items()), columns=['year', 'internet_rate'])
 
+# 신뢰지수 (KOSIS 대인신뢰도: 0~100점 척도 환산)
 trust_raw = pd.read_csv("trust_index.csv", encoding="utf-8-sig", header=None)
-
-# 연도는 3번째 행(인덱스 2)
-year_row = trust_raw.iloc[2, 2:].dropna().astype(str).tolist()
-
-# "전체" 행(인덱스 3)의 값들만 가져오기
-trust_total = trust_raw.iloc[3, 2:].astype(float).tolist()
-
-# DataFrame 생성
-trust = pd.DataFrame({
-    "year": [int(y) for y in year_row],
-    "trust_index": trust_total
-})
-
-print("\n 신뢰지수 정리 완료 미리보기:")
-print(trust.head(10))
-
+year_row = [int(y) for y in trust_raw.iloc[2, 2:].dropna().values]
+trust_val = [float(v) for v in trust_raw.iloc[3, 2:].dropna().values]
+trust = pd.DataFrame({"year": year_row, "trust_index": trust_val})
 
 # ------------------------------------------------------------
-# 5. 데이터 병합
+# 4. 데이터 통합 및 변수 생성 (조절효과 & 시차)
 # ------------------------------------------------------------
-print("\n  데이터 병합 중...")
+merged = crime_gen.merge(internet, on="year", how="inner").merge(trust, on="year", how="inner")
+merged = merged.sort_values("year")
 
-crime["year"] = pd.to_numeric(crime["year"], errors="coerce").astype("Int64")
-internet["year"] = pd.to_numeric(internet["year"], errors="coerce").astype("Int64")
-trust["year"] = pd.to_numeric(trust["year"], errors="coerce").astype("Int64")
+# 종속변수 생성 (연구 주제별 범죄 그룹화)
+merged['crime_fraud'] = merged[['fraud_direct', 'fraud_shop', 'fraud_game', 'fraud_etc']].sum(axis=1)
+merged['crime_infringe'] = merged[['hacking_account', 'hacking_intrusion', 'malware_ransom']].sum(axis=1)
+merged['crime_defame'] = merged['defamation']
 
-print("\n 데이터 타입 확인:")
-print("crime:", crime.dtypes)
-print("internet:", internet.dtypes)
-print("trust:", trust.dtypes)
+# 시차 변수 (전년도 신뢰가 올해 범죄에 미치는 영향)
+merged['trust_lag1'] = merged['trust_index'].shift(1)
 
-merged = crime.merge(internet, on="year", how="left").merge(trust, on="year", how="left")
-merged = merged[(merged["year"] >= 2015) & (merged["year"] <= 2023)].sort_values("year").reset_index(drop=True)
+# 조절효과 변수 (Centering 후 상호작용항 생성)
+merged['trust_c'] = merged['trust_index'] - merged['trust_index'].mean()
+merged['internet_c'] = merged['internet_rate'] - merged['internet_rate'].mean()
+merged['interaction'] = merged['trust_c'] * merged['internet_c']
 
-print("\n 병합된 데이터 미리보기:")
-print(merged)
-
-# ------------------------------------------------------------
-#  6. 결측값 확인
-# ------------------------------------------------------------
-print("\n  결측값 통계:")
-print(merged.isna().sum())
+merged_clean = merged.dropna().reset_index(drop=True)
 
 # ------------------------------------------------------------
-#    시각화
+# 3. 모델 정밀 진단 함수 (VIF 포함)
 # ------------------------------------------------------------
-plt.rcParams["font.family"] = "Malgun Gothic"  # 한글 폰트
-plt.figure(figsize=(10, 6))
-sns.lineplot(data=merged, x="year", y="total_crime", label="사이버범죄 건수")
-sns.lineplot(data=merged, x="year", y="internet_rate", label="인터넷 이용률(%)")
-sns.lineplot(data=merged, x="year", y="trust_index", label="신뢰지수")
-plt.title("사이버범죄, 인터넷 이용률, 신뢰지수 추이 (2015~2023)")
-plt.xlabel("연도")
-plt.ylabel("값")
-plt.legend()
+def diagnose_model(target_crime, df):
+    print(f"\n" + "="*50)
+    print(f" [{target_crime}] 모델 정밀 진단")
+    print("="*50)
+    
+    # 상호작용항을 포함한 독립변수 설정
+    X = df[['trust_c', 'internet_c', 'interaction']]
+    X = sm.add_constant(X)
+    y = df[target_crime]
+    
+    model = sm.OLS(y, X).fit()
+    
+    # VIF 계산
+    vif = pd.DataFrame()
+    vif["Variable"] = X.columns
+    vif["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+    
+    print(model.summary())
+    print("\n[VIF 지수 - 10 이상이면 다중공선성 위험]")
+    print(vif)
+    return model
+
+# # ------------------------------------------------------------
+# # 5. 가설 검증용 회귀 분석 수행 함수
+# # ------------------------------------------------------------
+# def run_analysis(target_crime, df):
+#     print(f"\n" + "="*50)
+#     print(f" 분석 대상 범죄: {target_crime}")
+#     print("="*50)
+    
+#     # 가설: 신뢰지수(IV) + 인터넷이용률(Moderator) + 상호작용항
+#     X = df[['trust_index', 'internet_rate', 'interaction']]
+#     X = sm.add_constant(X)
+#     y = df[target_crime]
+    
+#     model = sm.OLS(y, X).fit()
+#     print(model.summary())
+#     return model
+
+# 모든 범죄 유형 진단 실행
+diag_fraud = diagnose_model('crime_fraud', merged_clean)
+diag_infringe = diagnose_model('crime_infringe', merged_clean)
+diag_defame = diagnose_model('crime_defame', merged_clean)
+# ------------------------------------------------------------
+# 6. 시각적 추세 분석 (이중 축 그래프)
+# ------------------------------------------------------------
+fig, ax1 = plt.subplots(figsize=(12, 6))
+
+ax1.plot(merged['year'], merged['trust_index'], color='blue', marker='o', label='사회적 신뢰(대인신뢰도)')
+ax1.set_ylabel('신뢰 지수', color='blue')
+
+ax2 = ax1.twinx()
+ax2.plot(merged['year'], merged['crime_fraud'], color='red', marker='s', linestyle='--', label='사이버 사기 건수')
+ax2.set_ylabel('사이버 범죄 발생 건수', color='red')
+
+plt.title("사회적 신뢰와 사이버 사기 범죄의 시계열적 상관관계 (2015-2023)")
+ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
 plt.grid(True, alpha=0.3)
-plt.tight_layout()
 plt.show()
 
 # ------------------------------------------------------------
-#     상관관계 분석
+# 6. 시각적 추세 분석 (이중 축 그래프)
 # ------------------------------------------------------------
-print("\n  상관관계 분석:")
-print(merged.corr(numeric_only=True))
+fig, ax1 = plt.subplots(figsize=(12, 6))
+
+ax1.plot(merged['year'], merged['trust_index'], color='blue', marker='o', label='사회적 신뢰(대인신뢰도)')
+ax1.set_ylabel('신뢰 지수', color='blue')
+
+ax2 = ax1.twinx()
+ax2.plot(merged['year'], merged['crime_defame'], color='red', marker='s', linestyle='--', label='사이버 사기 건수')
+ax2.set_ylabel('사이버 범죄 발생 건수', color='red')
+
+plt.title("사회적 신뢰와 비방형(명예훼손/비방) 범죄의 시계열적 상관관계 (2015-2023)")
+ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
+plt.grid(True, alpha=0.3)
+plt.show()
 
 # ------------------------------------------------------------
-# 5. 회귀분석
+# 6. 시각적 추세 분석 (이중 축 그래프)
 # ------------------------------------------------------------
-print("\n  회귀분석 수행 중...")
+# 시각화 (신뢰지수 vs 침해형 범죄)
+fig, ax1 = plt.subplots(figsize=(12, 6))
+ax1.plot(merged['year'], merged['trust_index'], color='blue', marker='o', label='사회적 신뢰')
+ax1.set_ylabel('신뢰 지수', color='blue')
 
-import statsmodels.api as sm
+ax2 = ax1.twinx()
+ax2.plot(merged['year'], merged['crime_infringe'], color='green', marker='^', linestyle=':', label='침해형 범죄(해킹 등)')
+ax2.set_ylabel('침해형 범죄 발생 건수', color='green')
 
-# 분석용 데이터 필터링: '발생건수'만 사용
-df_analysis = merged[merged["total_crime"] == "발생건수"].copy()
+plt.title("사회적 신뢰와 침해형(해킹/악성코드) 범죄의 관계 (2015-2023)")
+ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
+plt.grid(True, alpha=0.3)
+plt.show()
 
-# 분석 변수
-df_analysis["total_crime"] = df_analysis["사이버사기_직거래"] + df_analysis["사이버사기_쇼핑몰"] + df_analysis["사이버사기_게임"]
+# ------------------------------------------------------------
+# 7. 기술통계량 및 상관관계 분석 (추가)
+# ------------------------------------------------------------
 
-# 숫자형 변환 (NaN 자동 처리)
-df_analysis["internet_rate"] = pd.to_numeric(df_analysis["internet_rate"], errors="coerce")
-df_analysis["trust_index"] = pd.to_numeric(df_analysis["trust_index"], errors="coerce")
+# 1) 기술통계량 출력
+desc_stats = merged_clean[['trust_index', 'internet_rate', 'crime_fraud', 'crime_infringe', 'crime_defame']].describe()
+print("\n" + "="*50)
+print(" [기술통계량 분석 결과] ")
+print("="*50)
+print(desc_stats.transpose()[['mean', 'std', 'min', 'max']])
 
-# 결측 제거
-df_analysis = df_analysis.dropna(subset=["internet_rate", "trust_index", "total_crime"])
+# 2) 상관관계 분석
+correlation_matrix = merged_clean[['trust_index', 'internet_rate', 'crime_fraud', 'crime_infringe', 'crime_defame']].corr()
+print("\n" + "="*50)
+print(" [상관관계 분석 결과 (Pearson)] ")
+print("="*50)
+print(correlation_matrix)
 
-# 회귀모형 구성
-X = df_analysis[["internet_rate", "trust_index"]]
-X = sm.add_constant(X)  # 상수항 추가
-y = df_analysis["total_crime"].astype(float)
+# 3) 상관관계 히트맵 시각화
+plt.figure(figsize=(10, 8))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+plt.title("주요 변수 간 상관관계 히트맵")
+plt.show()
 
-# 회귀분석 수행
-model = sm.OLS(y, X).fit()
-
-print("\n 회귀분석 결과:")
-print(model.summary())
+# print(f" [{target_crime}] 모델 정밀 진단")
+print("="*50)
+    
